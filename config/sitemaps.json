@@ -1,0 +1,27 @@
+{
+  "sitemaps": [
+    "https://evidentscientific.com/sitemap-en.xml",
+    "https://evidentscientific.com/sitemap-es.xml",
+    "https://evidentscientific.com/sitemap-fr.xml",
+    "https://evidentscientific.com/sitemap-de.xml",
+    "https://evidentscientific.com/sitemap-it.xml",
+    "https://evidentscientific.com/sitemap-ko.xml",
+    "https://evidentscientific.com/sitemap-ja.xml",
+    "https://evidentscientific.com/sitemap-zh.xml"
+  ],
+  "detection_thresholds": {
+    "min_word_count": 100,
+    "require_description": true,
+    "require_specifications": true
+  },
+  "performance": {
+    "delay_between_requests": 1.5,
+    "max_retries": 3,
+    "timeout_seconds": 30,
+    "parallel_workers": 1
+  },
+  "output": {
+    "directory": "./output",
+    "format": ["csv", "xlsx"]
+  }
+}
