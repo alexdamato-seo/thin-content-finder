@@ -4,6 +4,7 @@ Page Analyzer Module
 Renders JavaScript-heavy pages with a headless browser and extracts content metrics.
 """
 
+import os
 import re
 import time
 import logging
@@ -123,6 +124,13 @@ class PageAnalyzer:
         # Reduce memory usage
         options.add_argument('--disable-browser-side-navigation')
         options.add_argument('--disable-infobars')
+
+        # Configure proxy from environment variables
+        proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy') or \
+                os.environ.get('HTTP_PROXY') or os.environ.get('http_proxy')
+        if proxy:
+            logger.info(f"Configuring Chrome with proxy: {proxy[:50]}...")
+            options.add_argument(f'--proxy-server={proxy}')
 
         # Page load strategy - wait for DOM only, not all resources
         options.page_load_strategy = 'eager'
