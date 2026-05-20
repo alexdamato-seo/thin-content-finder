@@ -39,7 +39,7 @@ def _to_row(r: DetectionResult) -> dict:
         'page_title': r.page_title,
         'h1': r.h1,
         'flag_reasons': r.flag_reasons,
-        'http_status': r.http_status if r.http_status is not None else 'ERROR',
+        'http_status': r.http_status if r.http_status is not None else 'N/A',
         'check_b_skipped': 'TRUE' if r.check_b_skipped else 'FALSE',
     }
 

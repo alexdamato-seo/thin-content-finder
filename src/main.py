@@ -101,8 +101,31 @@ def crawl_pages(
     return results
 
 
+def load_urls_from_file(path: str) -> List[SitemapURL]:
+    """
+    Load product URLs from a plain-text file (one URL per line).
+
+    Skips blank lines and comment lines starting with #.
+    Locale is extracted from each URL path; falls back to 'en'.
+    """
+    from .sitemap_parser import _locale_from_url, _locale_from_sitemap_url
+    urls: List[SitemapURL] = []
+    with open(path, 'r', encoding='utf-8') as f:
+        for raw in f:
+            url = raw.strip()
+            if not url or url.startswith('#'):
+                continue
+            if '/products/' not in url:
+                continue
+            locale = _locale_from_url(url) or 'en'
+            urls.append(SitemapURL(url=url, locale=locale))
+    print(f'Loaded {len(urls):,} product URLs from {path}')
+    return urls
+
+
 def run_audit(
     sitemaps: Optional[List[str]] = None,
+    urls_file: Optional[str] = None,
     limit: Optional[int] = None,
     dry_run: bool = False,
     output_dir: str = './output',
@@ -114,13 +137,21 @@ def run_audit(
     start = time.time()
     sitemap_list = sitemaps or SITEMAP_URLS
 
+    url_only_mode = urls_file is not None
+
     print('\n' + '=' * 60)
     print('THIN CONTENT FINDER — EVIDENT SCIENTIFIC')
     print('=' * 60)
-    print(f'Sitemaps: {len(sitemap_list)}')
+    if url_only_mode:
+        print('Mode: URL-pattern only (Check A, no page fetching)')
+    else:
+        print(f'Sitemaps: {len(sitemap_list)}')
 
-    # Step 1 — collect product URLs from sitemaps
-    product_urls = collect_product_urls(sitemap_list, timeout=timeout, max_retries=max_retries)
+    # Step 1 — collect product URLs
+    if url_only_mode:
+        product_urls = load_urls_from_file(urls_file)
+    else:
+        product_urls = collect_product_urls(sitemap_list, timeout=timeout, max_retries=max_retries)
 
     if not product_urls:
         print('No product URLs found. Exiting.')
@@ -131,28 +162,31 @@ def run_audit(
         product_urls = product_urls[:limit]
 
     if dry_run:
-        print(f'\n[DRY RUN] Would crawl {len(product_urls):,} product URLs. Exiting.')
+        print(f'\n[DRY RUN] {len(product_urls):,} product URLs found. Exiting.')
         return []
 
-    # Step 2 — crawl each product page (Check B)
-    page_results = crawl_pages(
-        product_urls,
-        timeout=timeout,
-        min_delay=min_delay,
-        max_delay=max_delay,
-        max_retries=max_retries,
-    )
-
-    # Build page_result lookup by URL
-    page_result_map = {pr.url: pr for pr in page_results}
+    # Step 2 — Check B (fetch pages for title/H1), or skip in URL-only mode
+    from .page_analyzer import PageResult
+    if url_only_mode:
+        print(f'\nURL-only mode: applying Check A to {len(product_urls):,} URLs (Check B skipped)...')
+        page_result_map = {
+            su.url: PageResult(url=su.url, check_b_skipped=True)
+            for su in product_urls
+        }
+    else:
+        page_results = crawl_pages(
+            product_urls,
+            timeout=timeout,
+            min_delay=min_delay,
+            max_delay=max_delay,
+            max_retries=max_retries,
+        )
+        page_result_map = {pr.url: pr for pr in page_results}
 
     # Step 3 — apply Check A + Check B, build DetectionResults
     results: List[DetectionResult] = []
     for su in product_urls:
-        pr = page_result_map.get(su.url)
-        if pr is None:
-            from .page_analyzer import PageResult
-            pr = PageResult(url=su.url, error='No fetch result', check_b_skipped=True)
+        pr = page_result_map.get(su.url) or PageResult(url=su.url, check_b_skipped=True)
         results.append(build_result(su, pr))
 
     # Step 4 — generate reports
@@ -184,6 +218,13 @@ Examples:
         """,
     )
     parser.add_argument('--sitemaps', '-s', nargs='+', help='Override sitemap URLs')
+    parser.add_argument(
+        '--urls-file', '-u',
+        type=str,
+        metavar='FILE',
+        help='Plain-text file of product URLs (one per line). Skips sitemap fetching '
+             'and page crawling — runs Check A (URL pattern) only.',
+    )
     parser.add_argument('--limit', '-l', type=int, help='Cap number of URLs to analyze')
     parser.add_argument('--dry-run', '-n', action='store_true', help='Preview without crawling')
     parser.add_argument('--output-dir', '-o', default='./output', help='Output directory')
@@ -202,6 +243,7 @@ def main() -> None:
     try:
         results = run_audit(
             sitemaps=args.sitemaps,
+            urls_file=args.urls_file,
             limit=args.limit,
             dry_run=args.dry_run,
             output_dir=args.output_dir,
