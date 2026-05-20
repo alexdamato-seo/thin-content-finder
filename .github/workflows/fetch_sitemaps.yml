@@ -1,0 +1,97 @@
+name: Fetch Sitemaps
+
+on:
+  push:
+    branches:
+      - 'claude/thin-content-finder-Ja8SA'
+    paths:
+      - '.github/workflows/fetch_sitemaps.yml'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch all 8 sitemaps and extract product URLs
+        run: |
+          python3 - <<'PYEOF'
+          import requests, re, sys
+          import xml.etree.ElementTree as ET
+
+          SITEMAPS = [
+              "https://evidentscientific.com/sitemap-en.xml",
+              "https://evidentscientific.com/sitemap-es.xml",
+              "https://evidentscientific.com/sitemap-fr.xml",
+              "https://evidentscientific.com/sitemap-de.xml",
+              "https://evidentscientific.com/sitemap-it.xml",
+              "https://evidentscientific.com/sitemap-ko.xml",
+              "https://evidentscientific.com/sitemap-ja.xml",
+              "https://evidentscientific.com/sitemap-zh.xml",
+          ]
+
+          NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+          HEADERS = {"User-Agent": "ThinContentAudit/1.0"}
+
+          def parse_xml(xml_text, source):
+              urls = []
+              try:
+                  root = ET.fromstring(xml_text)
+              except ET.ParseError as e:
+                  print(f"  Parse error in {source}: {e}", file=sys.stderr)
+                  return urls
+
+              if "sitemapindex" in root.tag.lower():
+                  child_locs = root.findall(".//sm:sitemap/sm:loc", NS) or root.findall(".//sitemap/loc")
+                  children = [el.text.strip() for el in child_locs if el.text]
+                  print(f"  Sitemap index with {len(children)} children")
+                  for child in children:
+                      resp = requests.get(child, headers=HEADERS, timeout=30)
+                      if resp.ok:
+                          urls.extend(parse_xml(resp.text, child))
+                      else:
+                          print(f"  WARNING: {child} returned {resp.status_code}", file=sys.stderr)
+                  return urls
+
+              url_elems = root.findall(".//sm:url", NS) or root.findall(".//url")
+              for ue in url_elems:
+                  loc = ue.find("sm:loc", NS)
+                  if loc is None:
+                      loc = ue.find("loc")
+                  if loc is not None and loc.text:
+                      urls.append(loc.text.strip())
+              return urls
+
+          all_product_urls = []
+          for sitemap in SITEMAPS:
+              print(f"Fetching {sitemap}")
+              try:
+                  resp = requests.get(sitemap, headers=HEADERS, timeout=30)
+                  if not resp.ok:
+                      print(f"  WARNING: {resp.status_code}", file=sys.stderr)
+                      continue
+                  raw_urls = parse_xml(resp.text, sitemap)
+                  product_urls = [u for u in raw_urls if "/products/" in u]
+                  print(f"  {len(product_urls)} product URLs (of {len(raw_urls)} total)")
+                  all_product_urls.extend(product_urls)
+              except Exception as e:
+                  print(f"  ERROR: {e}", file=sys.stderr)
+
+          all_product_urls = sorted(set(all_product_urls))
+          with open("urls.txt", "w") as f:
+              f.write("\n".join(all_product_urls) + "\n")
+
+          print(f"\nTotal unique product URLs: {len(all_product_urls)}")
+          print("Written to urls.txt")
+          PYEOF
+
+      - name: Commit urls.txt
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add urls.txt
+          git diff --cached --quiet && echo "No changes to commit" || \
+            git commit -m "ci: add fetched product URLs from all 8 sitemaps" && git push
