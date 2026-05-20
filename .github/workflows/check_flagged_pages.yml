@@ -1,0 +1,160 @@
+name: Check Flagged Pages
+
+on:
+  push:
+    branches:
+      - 'claude/thin-content-finder-Ja8SA'
+    paths:
+      - '.github/workflows/check_flagged_pages.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 lxml
+
+      - name: Crawl flagged pages and detect objectives
+        run: |
+          python3 - <<'PYEOF'
+          import csv, re, time, random, sys, html
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+
+          INPUT  = "output/thin_content_report.csv"
+          OUTPUT = "output/checked_thin_report.csv"
+
+          HEADERS = {
+              "User-Agent": "ThinContentAudit/1.0",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "en,ja,zh,de,fr,es,it,ko;q=0.5",
+          }
+
+          # Keywords that indicate a real objective/product spec page
+          OBJECTIVE_KEYWORDS = [
+              "numerical aperture", "working distance", "magnification",
+              "parfocal", "immersion medium", "objective type", "back focal",
+              "coverglass", "field number", "apochromat", "fluorite",
+              "na:", "wd:", "na ", " na:", "correction collar",
+              "reflected brightfield", "mounting thread",
+          ]
+
+          # Keywords for other spec-rich product types (non-objectives but still real pages)
+          SPEC_KEYWORDS = [
+              "specifications", "technical data", "weight", "dimensions",
+              "pixel", "resolution", "frame rate", "wavelength", "voltage",
+              "interface", "compatibility", "sensor", "aperture",
+          ]
+
+          session = requests.Session()
+          session.headers.update(HEADERS)
+
+          def fetch(url):
+              try:
+                  r = session.get(url, timeout=20, allow_redirects=True)
+                  soup = BeautifulSoup(r.text, "lxml")
+
+                  title = soup.title.string.strip() if soup.title and soup.title.string else ""
+                  h1_tag = soup.find("h1")
+                  h1 = h1_tag.get_text(strip=True) if h1_tag else ""
+
+                  # Get visible body text (exclude nav/header/footer/scripts)
+                  for tag in soup(["script","style","nav","header","footer","noscript"]):
+                      tag.decompose()
+                  body_text = soup.get_text(" ", strip=True).lower()
+
+                  word_count = len(body_text.split())
+
+                  is_objective = any(kw in body_text for kw in OBJECTIVE_KEYWORDS)
+                  has_specs    = any(kw in body_text for kw in SPEC_KEYWORDS)
+                  has_content  = word_count > 80
+
+                  if is_objective:
+                      verdict = "objective"
+                  elif has_specs or has_content:
+                      verdict = "has_content"
+                  else:
+                      verdict = "thin_empty"
+
+                  return {
+                      "http_status":   r.status_code,
+                      "fetched_title": title,
+                      "fetched_h1":    h1,
+                      "word_count":    word_count,
+                      "is_objective":  "TRUE" if is_objective else "FALSE",
+                      "has_specs":     "TRUE" if has_specs    else "FALSE",
+                      "has_content":   "TRUE" if has_content  else "FALSE",
+                      "verdict":       verdict,
+                      "error":         "",
+                  }
+              except requests.Timeout:
+                  return {"http_status":"timeout","fetched_title":"","fetched_h1":"","word_count":0,
+                          "is_objective":"FALSE","has_specs":"FALSE","has_content":"FALSE",
+                          "verdict":"error","error":"timeout"}
+              except Exception as e:
+                  return {"http_status":"error","fetched_title":"","fetched_h1":"","word_count":0,
+                          "is_objective":"FALSE","has_specs":"FALSE","has_content":"FALSE",
+                          "verdict":"error","error":str(e)[:120]}
+
+          # Read flagged URLs
+          with open(INPUT, newline="", encoding="utf-8") as f:
+              rows = list(csv.DictReader(f))
+
+          print(f"Processing {len(rows)} flagged URLs...")
+
+          OUT_COLS = [
+              "url","locale","check_a_sku_url",
+              "http_status","fetched_title","fetched_h1","word_count",
+              "is_objective","has_specs","has_content","verdict","error",
+          ]
+
+          done = 0
+          with open(OUTPUT, "w", newline="", encoding="utf-8") as out_f:
+              writer = csv.DictWriter(out_f, fieldnames=OUT_COLS, quoting=csv.QUOTE_ALL)
+              writer.writeheader()
+
+              for row in rows:
+                  url = row["url"]
+                  time.sleep(random.uniform(0.4, 0.7))
+                  result = fetch(url)
+
+                  writer.writerow({
+                      "url":            url,
+                      "locale":         row["locale"],
+                      "check_a_sku_url": row["check_a_sku_url"],
+                      **result,
+                  })
+                  out_f.flush()
+
+                  done += 1
+                  if done % 100 == 0:
+                      v = result["verdict"]
+                      print(f"  {done}/{len(rows)} — last: {v} — {url}")
+
+          # Summary
+          with open(OUTPUT, newline="", encoding="utf-8") as f:
+              results = list(csv.DictReader(f))
+
+          verdicts = {}
+          for r in results:
+              verdicts[r["verdict"]] = verdicts.get(r["verdict"], 0) + 1
+
+          print(f"\n=== Results ===")
+          for v, n in sorted(verdicts.items()):
+              print(f"  {v}: {n}")
+          print(f"Written to {OUTPUT}")
+          PYEOF
+
+      - name: Commit results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add output/checked_thin_report.csv
+          git diff --cached --quiet && echo "No changes" || \
+            git commit -m "ci: add checked_thin_report with objective detection" && git push
