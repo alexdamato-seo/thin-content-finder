@@ -1,6 +1,7 @@
 name: Check Flagged Pages
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - 'claude/thin-content-finder-Ja8SA'
@@ -19,6 +20,14 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4 lxml
 
+      - name: Test site connectivity
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            "https://evidentscientific.com/en/products/ax0003/ax0003")
+          echo "Test page HTTP status: $STATUS"
+          if [ "$STATUS" = "000" ]; then echo "ERROR: Could not reach site at all"; exit 1; fi
+
       - name: Crawl flagged pages and detect objectives
         run: |
           python3 - <<'PYEOF'
@@ -31,9 +40,12 @@ jobs:
           OUTPUT = "output/checked_thin_report.csv"
 
           HEADERS = {
-              "User-Agent": "ThinContentAudit/1.0",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-              "Accept-Language": "en,ja,zh,de,fr,es,it,ko;q=0.5",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Accept-Encoding": "gzip, deflate, br",
+              "Connection": "keep-alive",
+              "Upgrade-Insecure-Requests": "1",
           }
 
           # Keywords that indicate a real objective/product spec page
