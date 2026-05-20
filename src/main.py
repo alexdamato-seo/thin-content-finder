@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Sitemap Thin Page Analyzer
+Thin Content Finder — Evident Scientific
 
-A tool that analyzes sitemaps to identify "thin" product pages
-that lack substantial content.
+Crawls 8 locale-specific sitemaps, identifies product URLs that are likely
+"thin content" via SKU URL patterns and page title/H1 checks, and outputs
+two CSV reports.
 
 Usage:
     python -m src.main [options]
-    python src/main.py [options]
+    python src/main.py  [options]
 """
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -22,379 +22,204 @@ from typing import List, Optional
 from tqdm import tqdm
 
 from .sitemap_parser import SitemapParser, SitemapURL
-from .page_analyzer import PageAnalyzer, PageMetrics
-from .thin_detector import ThinPageDetector, DetectionThresholds, DetectionResult
-from .report_generator import ReportGenerator, print_summary
+from .page_analyzer import PageFetcher, PageResult
+from .thin_detector import build_result, DetectionResult
+from .report_generator import generate_reports, print_summary
 
-# Default configuration
-DEFAULT_CONFIG = {
-    "sitemaps": [
-        "https://evidentscientific.com/sitemap-en.xml",
-        "https://evidentscientific.com/sitemap-es.xml",
-        "https://evidentscientific.com/sitemap-fr.xml",
-        "https://evidentscientific.com/sitemap-de.xml",
-        "https://evidentscientific.com/sitemap-it.xml",
-        "https://evidentscientific.com/sitemap-ko.xml",
-        "https://evidentscientific.com/sitemap-ja.xml",
-        "https://evidentscientific.com/sitemap-zh.xml"
-    ],
-    "detection_thresholds": {
-        "min_word_count": 100,
-        "require_description": True,
-        "require_specifications": True
-    },
-    "performance": {
-        "delay_between_requests": 1.5,
-        "max_retries": 3,
-        "timeout_seconds": 30,
-        "parallel_workers": 1
-    },
-    "output": {
-        "directory": "./output",
-        "format": ["csv", "xlsx"]
-    }
-}
+SITEMAP_URLS = [
+    'https://evidentscientific.com/sitemap-en.xml',
+    'https://evidentscientific.com/sitemap-es.xml',
+    'https://evidentscientific.com/sitemap-fr.xml',
+    'https://evidentscientific.com/sitemap-de.xml',
+    'https://evidentscientific.com/sitemap-it.xml',
+    'https://evidentscientific.com/sitemap-ko.xml',
+    'https://evidentscientific.com/sitemap-ja.xml',
+    'https://evidentscientific.com/sitemap-zh.xml',
+]
+
+BASE_URL = 'https://evidentscientific.com'
 
 
 def setup_logging(verbose: bool = False) -> None:
-    """Configure logging."""
     log_level = logging.DEBUG if verbose else logging.INFO
-
-    # Create logs directory
     logs_dir = Path('./logs')
     logs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Log file with timestamp
     timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
-    log_file = logs_dir / f"analysis_{timestamp}.log"
-
-    # Configure logging
+    log_file = logs_dir / f'audit_{timestamp}.log'
     logging.basicConfig(
         level=log_level,
-        format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+        format='%(asctime)s %(levelname)s %(name)s — %(message)s',
         handlers=[
             logging.FileHandler(log_file),
-            logging.StreamHandler(sys.stdout)
-        ]
+            logging.StreamHandler(sys.stdout),
+        ],
     )
-
-    # Reduce noise from libraries
-    logging.getLogger('selenium').setLevel(logging.WARNING)
     logging.getLogger('urllib3').setLevel(logging.WARNING)
-
-
-def load_config(config_path: Optional[str] = None) -> dict:
-    """Load configuration from file or use defaults."""
-    config = DEFAULT_CONFIG.copy()
-
-    if config_path:
-        try:
-            with open(config_path, 'r') as f:
-                user_config = json.load(f)
-                # Deep merge user config into default
-                for key, value in user_config.items():
-                    if isinstance(value, dict) and key in config:
-                        config[key].update(value)
-                    else:
-                        config[key] = value
-            logging.info(f"Loaded configuration from {config_path}")
-        except FileNotFoundError:
-            logging.warning(f"Config file not found: {config_path}, using defaults")
-        except json.JSONDecodeError as e:
-            logging.error(f"Invalid JSON in config file: {e}")
-            sys.exit(1)
-
-    return config
+    logging.getLogger('charset_normalizer').setLevel(logging.WARNING)
 
 
 def collect_product_urls(
-    sitemap_parser: SitemapParser,
-    sitemap_urls: List[str]
+    sitemaps: List[str],
+    timeout: int = 30,
+    max_retries: int = 3,
 ) -> List[SitemapURL]:
-    """Collect all product URLs from sitemaps."""
-    all_urls = []
+    parser = SitemapParser(timeout=timeout, max_retries=max_retries)
+    parser.load_robots(BASE_URL)
 
-    print("\nFetching sitemaps...")
-    for sitemap_url in tqdm(sitemap_urls, desc="Parsing sitemaps"):
-        product_urls = sitemap_parser.process_sitemap(sitemap_url)
-        all_urls.extend(product_urls)
-        logging.info(f"Found {len(product_urls)} product URLs in {sitemap_url}")
+    all_urls: List[SitemapURL] = []
+    print(f'\nFetching {len(sitemaps)} sitemaps...')
+    for sitemap_url in tqdm(sitemaps, desc='Parsing sitemaps'):
+        urls = parser.process_sitemap(sitemap_url)
+        all_urls.extend(urls)
 
-    print(f"\nTotal product URLs found: {len(all_urls):,}")
+    print(f'Total product URLs found: {len(all_urls):,}')
     return all_urls
 
 
-def analyze_pages(
+def crawl_pages(
     urls: List[SitemapURL],
-    config: dict
-) -> List[tuple[SitemapURL, PageMetrics]]:
-    """Analyze all product pages."""
-    results = []
-
-    perf_config = config.get('performance', {})
-    timeout = perf_config.get('timeout_seconds', 30)
-    delay = perf_config.get('delay_between_requests', 1.5)
-    max_retries = perf_config.get('max_retries', 3)
-
-    analyzer = PageAnalyzer(
+    timeout: int = 30,
+    min_delay: float = 0.5,
+    max_delay: float = 1.0,
+    max_retries: int = 3,
+) -> List[PageResult]:
+    fetcher = PageFetcher(
         timeout=timeout,
-        delay_between_requests=delay,
-        headless=True
+        min_delay=min_delay,
+        max_delay=max_delay,
+        max_retries=max_retries,
     )
-
-    print(f"\nAnalyzing {len(urls):,} pages (this may take a while)...")
-
-    try:
-        with tqdm(total=len(urls), desc="Analyzing pages", unit="page") as pbar:
-            for sitemap_url in urls:
-                metrics = None
-                last_error = None
-
-                # Retry logic
-                for attempt in range(max_retries):
-                    metrics = analyzer.analyze_page(sitemap_url.url)
-
-                    if metrics.error is None:
-                        break
-
-                    last_error = metrics.error
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** (attempt + 1))
-
-                if metrics is None:
-                    metrics = PageMetrics(
-                        url=sitemap_url.url,
-                        error=f"Failed after {max_retries} attempts: {last_error}"
-                    )
-
-                results.append((sitemap_url, metrics))
-                pbar.update(1)
-
-    finally:
-        analyzer.close()
-
-    return results
-
-
-def detect_thin_pages(
-    analysis_results: List[tuple[SitemapURL, PageMetrics]],
-    config: dict
-) -> List[DetectionResult]:
-    """Apply thin page detection to analyzed pages."""
-    threshold_config = config.get('detection_thresholds', {})
-    thresholds = DetectionThresholds(
-        min_word_count=threshold_config.get('min_word_count', 100),
-        require_description=threshold_config.get('require_description', True),
-        require_specifications=threshold_config.get('require_specifications', True)
-    )
-
-    detector = ThinPageDetector(thresholds=thresholds)
-    results = []
-
-    print("\nDetecting thin pages...")
-    for sitemap_url, metrics in tqdm(analysis_results, desc="Detecting"):
-        result = detector.detect(
-            metrics=metrics,
-            language=sitemap_url.language,
-            sku=sitemap_url.sku
-        )
+    results: List[PageResult] = []
+    print(f'\nCrawling {len(urls):,} product pages for title/H1 (Check B)...')
+    for sitemap_url in tqdm(urls, desc='Crawling pages', unit='page'):
+        result = fetcher.fetch(sitemap_url.url)
+        if result.error:
+            logging.getLogger(__name__).warning(
+                f"HTTP {result.http_status or 'ERR'} — {sitemap_url.url} — {result.error}"
+            )
         results.append(result)
-
     return results
 
 
-def generate_reports(
-    results: List[DetectionResult],
-    config: dict
-) -> dict:
-    """Generate output reports."""
-    output_config = config.get('output', {})
-    output_dir = output_config.get('directory', './output')
-    formats = output_config.get('format', ['csv', 'xlsx'])
-
-    generator = ReportGenerator(output_dir=output_dir)
-
-    print("\nGenerating reports...")
-    report_files = {}
-
-    if 'csv' in formats:
-        report_files['csv'] = generator.generate_csv(results)
-        print(f"  CSV report: {report_files['csv']}")
-
-    if 'xlsx' in formats:
-        report_files['excel'] = generator.generate_excel(results)
-        print(f"  Excel report: {report_files['excel']}")
-
-    # Always generate error log
-    error_results = [r for r in results if r.error]
-    if error_results:
-        report_files['error_log'] = generator.generate_error_log(results)
-        print(f"  Error log: {report_files['error_log']}")
-
-    return report_files
-
-
-def run_analysis(
-    config: dict,
+def run_audit(
     sitemaps: Optional[List[str]] = None,
+    limit: Optional[int] = None,
     dry_run: bool = False,
-    limit: Optional[int] = None
+    output_dir: str = './output',
+    timeout: int = 30,
+    min_delay: float = 0.5,
+    max_delay: float = 1.0,
+    max_retries: int = 3,
 ) -> List[DetectionResult]:
-    """Run the complete analysis workflow."""
-    logger = logging.getLogger(__name__)
-    start_time = time.time()
+    start = time.time()
+    sitemap_list = sitemaps or SITEMAP_URLS
 
-    # Use provided sitemaps or config default
-    sitemap_urls = sitemaps or config.get('sitemaps', DEFAULT_CONFIG['sitemaps'])
+    print('\n' + '=' * 60)
+    print('THIN CONTENT FINDER — EVIDENT SCIENTIFIC')
+    print('=' * 60)
+    print(f'Sitemaps: {len(sitemap_list)}')
 
-    print("\n" + "=" * 60)
-    print("SITEMAP THIN PAGE ANALYZER")
-    print("=" * 60)
-    print(f"Sitemaps to process: {len(sitemap_urls)}")
+    # Step 1 — collect product URLs from sitemaps
+    product_urls = collect_product_urls(sitemap_list, timeout=timeout, max_retries=max_retries)
 
-    # Step 1: Collect URLs from sitemaps
-    perf_config = config.get('performance', {})
-    sitemap_parser = SitemapParser(
-        timeout=perf_config.get('timeout_seconds', 30),
-        max_retries=perf_config.get('max_retries', 3)
+    if not product_urls:
+        print('No product URLs found. Exiting.')
+        return []
+
+    if limit and limit < len(product_urls):
+        print(f'Limiting to first {limit} URLs (--limit flag)')
+        product_urls = product_urls[:limit]
+
+    if dry_run:
+        print(f'\n[DRY RUN] Would crawl {len(product_urls):,} product URLs. Exiting.')
+        return []
+
+    # Step 2 — crawl each product page (Check B)
+    page_results = crawl_pages(
+        product_urls,
+        timeout=timeout,
+        min_delay=min_delay,
+        max_delay=max_delay,
+        max_retries=max_retries,
     )
 
-    all_urls = collect_product_urls(sitemap_parser, sitemap_urls)
+    # Build page_result lookup by URL
+    page_result_map = {pr.url: pr for pr in page_results}
 
-    if not all_urls:
-        print("No product URLs found in sitemaps. Exiting.")
-        return []
+    # Step 3 — apply Check A + Check B, build DetectionResults
+    results: List[DetectionResult] = []
+    for su in product_urls:
+        pr = page_result_map.get(su.url)
+        if pr is None:
+            from .page_analyzer import PageResult
+            pr = PageResult(url=su.url, error='No fetch result', check_b_skipped=True)
+        results.append(build_result(su, pr))
 
-    # Apply limit if specified
-    if limit and limit < len(all_urls):
-        print(f"Limiting analysis to first {limit} URLs")
-        all_urls = all_urls[:limit]
+    # Step 4 — generate reports
+    print('\nGenerating reports...')
+    thin_path, all_path = generate_reports(results, output_dir=output_dir)
+    print(f'  {thin_path}')
+    print(f'  {all_path}')
 
-    # Dry run - just report what would be analyzed
-    if dry_run:
-        print("\n[DRY RUN] Would analyze the following:")
-        print(f"  - Total URLs: {len(all_urls):,}")
-        for sitemap_url in sitemap_urls:
-            count = sum(1 for u in all_urls if sitemap_url.replace('.xml', '') in u.url)
-            print(f"  - {sitemap_url}: ~{count} URLs")
-        return []
+    # Step 5 — summary
+    print_summary(results, total_product_urls=len(product_urls))
 
-    # Step 2: Analyze pages
-    analysis_results = analyze_pages(all_urls, config)
-
-    # Step 3: Detect thin pages
-    detection_results = detect_thin_pages(analysis_results, config)
-
-    # Step 4: Generate reports
-    report_files = generate_reports(detection_results, config)
-
-    # Print summary
-    print_summary(detection_results)
-
-    elapsed_time = time.time() - start_time
-    hours, remainder = divmod(int(elapsed_time), 3600)
-    minutes, seconds = divmod(remainder, 60)
-    print(f"Processing time: {hours}h {minutes}m {seconds}s")
-    print(f"Output: {report_files.get('excel', report_files.get('csv', 'N/A'))}")
-
-    return detection_results
+    elapsed = time.time() - start
+    h, rem = divmod(int(elapsed), 3600)
+    m, s = divmod(rem, 60)
+    print(f'\nCompleted in {h}h {m}m {s}s')
+    return results
 
 
-def parse_args():
-    """Parse command line arguments."""
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description='Analyze sitemaps to identify thin product pages',
+        description='Identify thin product pages across locale sitemaps.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m src.main                    # Run with default config
-  python -m src.main --config custom.json  # Use custom config file
-  python -m src.main --limit 100        # Analyze only first 100 URLs
-  python -m src.main --dry-run          # Preview without analyzing
-  python -m src.main --sitemaps sitemap-en.xml sitemap-es.xml
-        """
+  python -m src.main                      # full audit
+  python -m src.main --limit 50           # test on first 50 URLs
+  python -m src.main --dry-run            # preview URL count only
+  python -m src.main --output-dir ./out   # custom output directory
+        """,
     )
-
-    parser.add_argument(
-        '--config', '-c',
-        type=str,
-        help='Path to configuration JSON file'
-    )
-
-    parser.add_argument(
-        '--sitemaps', '-s',
-        nargs='+',
-        type=str,
-        help='Specific sitemap URLs to analyze (overrides config)'
-    )
-
-    parser.add_argument(
-        '--dry-run', '-n',
-        action='store_true',
-        help='Preview what would be analyzed without actually running'
-    )
-
-    parser.add_argument(
-        '--limit', '-l',
-        type=int,
-        help='Limit number of URLs to analyze (useful for testing)'
-    )
-
-    parser.add_argument(
-        '--verbose', '-v',
-        action='store_true',
-        help='Enable verbose logging'
-    )
-
-    parser.add_argument(
-        '--output-dir', '-o',
-        type=str,
-        help='Output directory for reports (overrides config)'
-    )
-
+    parser.add_argument('--sitemaps', '-s', nargs='+', help='Override sitemap URLs')
+    parser.add_argument('--limit', '-l', type=int, help='Cap number of URLs to analyze')
+    parser.add_argument('--dry-run', '-n', action='store_true', help='Preview without crawling')
+    parser.add_argument('--output-dir', '-o', default='./output', help='Output directory')
+    parser.add_argument('--timeout', type=int, default=30, help='Request timeout (seconds)')
+    parser.add_argument('--min-delay', type=float, default=0.5, help='Min delay between requests (s)')
+    parser.add_argument('--max-delay', type=float, default=1.0, help='Max delay between requests (s)')
+    parser.add_argument('--max-retries', type=int, default=3, help='Max retry attempts')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
     return parser.parse_args()
 
 
-def main():
-    """Main entry point."""
+def main() -> None:
     args = parse_args()
-
-    # Setup logging
     setup_logging(verbose=args.verbose)
 
-    # Load configuration
-    config = load_config(args.config)
-
-    # Override config with command line arguments
-    if args.output_dir:
-        config['output']['directory'] = args.output_dir
-
     try:
-        # Run analysis
-        results = run_analysis(
-            config=config,
+        results = run_audit(
             sitemaps=args.sitemaps,
+            limit=args.limit,
             dry_run=args.dry_run,
-            limit=args.limit
+            output_dir=args.output_dir,
+            timeout=args.timeout,
+            min_delay=args.min_delay,
+            max_delay=args.max_delay,
+            max_retries=args.max_retries,
         )
-
-        if results:
-            thin_count = sum(1 for r in results if r.is_thin)
-            print(f"\nAnalysis complete! Found {thin_count:,} thin pages.")
-            sys.exit(0)
-        elif args.dry_run:
-            print("\nDry run complete.")
+        if results or args.dry_run:
             sys.exit(0)
         else:
-            print("\nNo results generated.")
             sys.exit(1)
-
     except KeyboardInterrupt:
-        print("\n\nAnalysis interrupted by user.")
+        print('\n\nInterrupted.')
         sys.exit(130)
     except Exception as e:
-        logging.exception(f"Analysis failed: {e}")
-        print(f"\nError: {e}")
+        logging.exception(f'Audit failed: {e}')
+        print(f'\nError: {e}')
         sys.exit(1)
 
 

@@ -1,86 +1,81 @@
 """Tests for sitemap_parser module."""
 
 import pytest
-from src.sitemap_parser import SitemapParser, SitemapURL
+from src.sitemap_parser import (
+    SitemapParser,
+    SitemapURL,
+    _locale_from_sitemap_url,
+    _locale_from_url,
+)
+
+
+class TestLocaleHelpers:
+    def test_locale_from_sitemap_url(self):
+        assert _locale_from_sitemap_url('https://evidentscientific.com/sitemap-ja.xml') == 'ja'
+        assert _locale_from_sitemap_url('https://evidentscientific.com/sitemap-en.xml') == 'en'
+        assert _locale_from_sitemap_url('https://evidentscientific.com/sitemap-zh.xml') == 'zh'
+        assert _locale_from_sitemap_url('https://evidentscientific.com/sitemap-en-1.xml') == 'en'
+
+    def test_locale_from_url_with_prefix(self):
+        assert _locale_from_url('https://evidentscientific.com/ja/products/ax0003/ax0003') == 'ja'
+        assert _locale_from_url('https://evidentscientific.com/de/products/test/test') == 'de'
+
+    def test_locale_from_url_no_prefix(self):
+        assert _locale_from_url('https://evidentscientific.com/products/ax0003/ax0003') is None
 
 
 class TestSitemapParser:
-    """Tests for SitemapParser class."""
+    def test_fetch_xml_returns_none_on_bad_url(self):
+        parser = SitemapParser(timeout=5)
+        result = parser.fetch_xml('http://localhost:1/nonexistent.xml')
+        assert result is None
 
-    def test_product_url_pattern_matches_valid_urls(self):
-        """Test that product URL pattern correctly identifies product pages."""
+    def test_parse_xml_urlset(self):
         parser = SitemapParser()
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://evidentscientific.com/en/products/ax0003/ax0003</loc></url>
+          <url><loc>https://evidentscientific.com/en/about</loc></url>
+          <url><loc>https://evidentscientific.com/ja/products/we402458/we402458</loc><lastmod>2024-01-01</lastmod></url>
+        </urlset>"""
+        entries = parser._parse_xml(xml, 'test-sitemap.xml')
+        assert len(entries) == 3
+        urls = [e['url'] for e in entries]
+        assert 'https://evidentscientific.com/en/products/ax0003/ax0003' in urls
+        assert 'https://evidentscientific.com/en/about' in urls
 
-        valid_urls = [
-            "https://evidentscientific.com/en/products/n2750300/n2750300",
-            "https://evidentscientific.com/de/products/ABC123/ABC123",
-            "https://evidentscientific.com/ja/products/U-B30050/U-B30050",
-        ]
-
-        for url in valid_urls:
-            match = parser.PRODUCT_URL_PATTERN.search(url)
-            assert match is not None, f"Should match: {url}"
-
-    def test_product_url_pattern_rejects_non_product_urls(self):
-        """Test that non-product URLs are not matched."""
+    def test_process_sitemap_filters_to_products(self, monkeypatch):
         parser = SitemapParser()
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://evidentscientific.com/en/products/ax0003/ax0003</loc></url>
+          <url><loc>https://evidentscientific.com/en/about</loc></url>
+        </urlset>"""
+        monkeypatch.setattr(parser, 'fetch_xml', lambda url: xml)
+        results = parser.process_sitemap('https://evidentscientific.com/sitemap-en.xml')
+        assert len(results) == 1
+        assert results[0].url == 'https://evidentscientific.com/en/products/ax0003/ax0003'
+        assert results[0].locale == 'en'
 
-        invalid_urls = [
-            "https://evidentscientific.com/en/about",
-            "https://evidentscientific.com/en/products",
-            "https://evidentscientific.com/en/contact",
-        ]
-
-        for url in invalid_urls:
-            match = parser.PRODUCT_URL_PATTERN.search(url)
-            assert match is None, f"Should not match: {url}"
-
-    def test_language_extraction(self):
-        """Test language code extraction from URLs."""
+    def test_process_sitemap_returns_empty_on_fetch_failure(self, monkeypatch):
         parser = SitemapParser()
+        monkeypatch.setattr(parser, 'fetch_xml', lambda url: None)
+        results = parser.process_sitemap('https://evidentscientific.com/sitemap-en.xml')
+        assert results == []
 
-        test_cases = [
-            ("https://evidentscientific.com/en/products/test/test", "en"),
-            ("https://evidentscientific.com/de/products/test/test", "de"),
-            ("https://evidentscientific.com/ja/products/test/test", "ja"),
-        ]
+    def test_sitemap_url_dataclass(self):
+        su = SitemapURL(url='https://example.com/products/ax0003/ax0003', locale='en')
+        assert su.url == 'https://example.com/products/ax0003/ax0003'
+        assert su.locale == 'en'
+        assert su.lastmod is None
 
-        for url, expected_lang in test_cases:
-            match = parser.LANGUAGE_PATTERN.search(url)
-            assert match is not None
-            assert match.group(1) == expected_lang
-
-    def test_filter_product_urls(self):
-        """Test URL filtering to product pages only."""
+    def test_robots_disallowed_urls_skipped(self, monkeypatch):
         parser = SitemapParser()
-
-        urls = [
-            "https://evidentscientific.com/en/products/n2750300/n2750300",
-            "https://evidentscientific.com/en/about",
-            "https://evidentscientific.com/de/products/ABC123/ABC123",
-            "https://evidentscientific.com/contact",
-        ]
-
-        filtered = parser.filter_product_urls(urls)
-
-        assert len(filtered) == 2
-        assert all(isinstance(u, SitemapURL) for u in filtered)
-        assert filtered[0].sku == "n2750300"
-        assert filtered[1].sku == "ABC123"
-
-
-class TestSitemapURL:
-    """Tests for SitemapURL dataclass."""
-
-    def test_sitemap_url_creation(self):
-        """Test SitemapURL dataclass creation."""
-        url = SitemapURL(
-            url="https://evidentscientific.com/en/products/test/test",
-            language="en",
-            sku="test"
-        )
-
-        assert url.url == "https://evidentscientific.com/en/products/test/test"
-        assert url.language == "en"
-        assert url.sku == "test"
-        assert url.lastmod is None
+        monkeypatch.setattr(parser, 'is_allowed', lambda url: False)
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url><loc>https://evidentscientific.com/en/products/ax0003/ax0003</loc></url>
+        </urlset>"""
+        monkeypatch.setattr(parser, 'fetch_xml', lambda url: xml)
+        results = parser.process_sitemap('https://evidentscientific.com/sitemap-en.xml')
+        assert results == []

@@ -1,22 +1,14 @@
-# Sitemap Thin Page Analyzer Dependencies
+# Thin Content Finder — dependencies
 
-# Web scraping and browser automation
-selenium>=4.15.0
+# HTTP requests
+requests>=2.31.0
 
 # HTML parsing
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 
-# Data processing and export
-pandas>=2.1.0
-openpyxl>=3.1.0
-
-# HTTP requests
-requests>=2.31.0
-
 # Progress display
 tqdm>=4.66.0
 
-# For development/testing (optional)
-# pytest>=7.4.0
-# pytest-cov>=4.1.0
+# Testing
+pytest>=7.4.0
